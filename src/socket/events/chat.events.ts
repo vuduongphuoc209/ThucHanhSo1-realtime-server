@@ -10,6 +10,7 @@ interface SendMessagePayload {
   conversationId: string;
   content: string;
   type?: "text" | "image" | "file";
+  clientMessageId: string;
 }
 
 export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
@@ -63,7 +64,7 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
   /**
    * SEND MESSAGE
    */
-  socket.on("send_message", async (payload: SendMessagePayload) => {
+  socket.on("send_message", async (payload, callback: (response: any) => void) => {
     try {
       if (!socket.userId) {
         socket.emit("chat_error", {
@@ -73,11 +74,11 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
         return;
       }
 
-      const { conversationId, content, type = "text" } = payload;
+      const { conversationId, content, type = "text", clientMessageId } = payload;
 
-      if (!conversationId || !content?.trim()) {
+      if (!conversationId || !content?.trim() || !clientMessageId) {
         socket.emit("chat_error", {
-          message: "conversationId and content are required",
+          message: "conversationId, content, and clientMessageId are required",
         });
 
         return;
@@ -108,6 +109,27 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
       }
 
       /**
+       * Check for duplicate message
+       */
+      const existing = await Message.findOne({
+        clientMessageId,
+      });
+
+      if (existing) {
+        const populatedExisting = await Message.findById(existing._id).populate(
+          "senderId",
+          "_id username email avatar",
+        );
+
+        callback?.({
+          success: true,
+          message: populatedExisting,
+        });
+
+        return;
+      }
+
+      /**
        * Save message
        */
       const message = await Message.create({
@@ -115,6 +137,7 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
         senderId: socket.userId,
         content: content.trim(),
         type,
+        clientMessageId,
       });
 
       /**
@@ -127,10 +150,7 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
       /**
        * Populate sender
        */
-      const populatedMessage = await Message.findById(message._id).populate(
-        "senderId",
-        "_id username email avatar",
-      );
+      const populatedMessage = await Message.findById(message._id).populate("senderId", "_id username email avatar");
 
       /**
        * Broadcast to everyone
@@ -139,10 +159,20 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
       io.to(`conversation:${conversationId}`).emit("new_message", {
         message: populatedMessage,
       });
+
+      callback?.({
+        success: true,
+        message: populatedMessage,
+      });
     } catch (error) {
       console.error("send_message error:", error);
 
       socket.emit("chat_error", {
+        message: "Failed to send message",
+      });
+
+      callback?.({
+        success: false,
         message: "Failed to send message",
       });
     }
@@ -193,66 +223,57 @@ export const registerChatEvents = (io: Server, socket: AuthenticatedSocket) => {
   /**
    * MESSAGE READ
    */
-  socket.on(
-    "message_read",
-    async ({
-      conversationId,
-      messageId,
-    }: {
-      conversationId: string;
-      messageId: string;
-    }) => {
-      try {
-        if (!socket.userId) {
-          return;
-        }
-
-        const conversation = await Conversation.findOne({
-          _id: conversationId,
-          participants: socket.userId,
-        });
-
-        if (!conversation) {
-          socket.emit("chat_error", {
-            message: "You are not a member of this conversation",
-          });
-
-          return;
-        }
-
-        const message = await Message.findOne({
-          _id: messageId,
-          conversationId,
-        });
-
-        if (!message) {
-          return;
-        }
-
-        /**
-         * Không cần đánh dấu tin nhắn của
-         * chính mình là đã đọc.
-         */
-        if (message.senderId.toString() === socket.userId) {
-          return;
-        }
-
-        message.isRead = true;
-
-        await message.save();
-
-        /**
-         * Thông báo cho những client khác
-         * trong conversation.
-         */
-        socket.to(`conversation:${conversationId}`).emit("message_read", {
-          messageId,
-          conversationId,
-          userId: socket.userId,
-        });
-      } catch (error) {
-        console.error("message_read error:", error);
+  socket.on("message_read", async ({ conversationId, messageId }: { conversationId: string; messageId: string }) => {
+    try {
+      if (!socket.userId) {
+        return;
       }
-    },
-  );
+
+      const conversation = await Conversation.findOne({
+        _id: conversationId,
+        participants: socket.userId,
+      });
+
+      if (!conversation) {
+        socket.emit("chat_error", {
+          message: "You are not a member of this conversation",
+        });
+
+        return;
+      }
+
+      const message = await Message.findOne({
+        _id: messageId,
+        conversationId,
+      });
+
+      if (!message) {
+        return;
+      }
+
+      /**
+       * Không cần đánh dấu tin nhắn của
+       * chính mình là đã đọc.
+       */
+      if (message.senderId.toString() === socket.userId) {
+        return;
+      }
+
+      message.isRead = true;
+
+      await message.save();
+
+      /**
+       * Thông báo cho những client khác
+       * trong conversation.
+       */
+      socket.to(`conversation:${conversationId}`).emit("message_read", {
+        messageId,
+        conversationId,
+        userId: socket.userId,
+      });
+    } catch (error) {
+      console.error("message_read error:", error);
+    }
+  });
 };

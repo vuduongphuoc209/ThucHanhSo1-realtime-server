@@ -6,6 +6,7 @@ export interface IMessage extends Document {
   content: string;
   type: "text" | "image" | "file";
   isRead: boolean;
+  clientMessageId: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -42,6 +43,11 @@ const messageSchema = new Schema<IMessage>(
     isRead: {
       type: Boolean,
       default: false,
+    },
+    clientMessageId: {
+      type: String,
+      required: true,
+      unique: true,
     },
   },
   {
